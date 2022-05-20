@@ -1,0 +1,5 @@
+.config
+.vscode/
+bin/
+obj/
+Compiler/scratchpad.chi
