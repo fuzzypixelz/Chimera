@@ -31,19 +31,38 @@ let run program =
 
 [<Test>]
 let FunctionCalls () =
-    let input = "fst(x: Int, y: Int): Int = x\nmain(): Int = fst(42, 69)\n"
+    let input = 
+        "fst(x: Int, y: Int): Int = x\n\
+        ![Entry]\n\
+        main(): Int = fst(42, 69)\n"
+
     Assert.AreEqual(42, run input)
 
 [<Test>]
 let NestedBindings () =
-    let input = "main(): Int = let x = 13 in let y = 69 in let x = 42 in x\n"
+    let input =
+        "![Entry]\n\
+        main(): Int = let x = 13 in let y = 69 in let x = 42 in x\n"
+
     Assert.AreEqual(42, run input)
 
 [<Test>]
 let NestedConditional () =
     let input =
         "not(x: Bool): Bool = if x then false else true\n\
+        ![Entry]\n\
         main(): Int = if not(false) then if not(true) then 13 else 42 else 69\n"
+
+    Assert.AreEqual(42, run input)
+
+[<Test>]
+let PassingFunctionToFunction () =
+    let input =
+        "fortyTwo(): Int = 42\n\
+        zero(): Int = 0\n\
+        call(number: () -> Int): Int = number()\n\
+        ![Entry]\n\
+        main(): Int = if true then call(fortyTwo) else call(zero)\n"
 
     Assert.AreEqual(42, run input)
 

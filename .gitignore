@@ -2,4 +2,5 @@
 .vscode/
 bin/
 obj/
+.fake
 Compiler/scratchpad.chi
