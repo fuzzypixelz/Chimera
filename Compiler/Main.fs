@@ -206,6 +206,13 @@ module Common =
                     yield symbol
             }
 
+        // Sequence of attributes of a symbol.
+        member this.AttrSeq(symbol: Symbol) : seq<Attr> =
+            seq {
+                for attr in directory[symbol] do
+                    yield attr
+            }
+
         // Give me the last element that's marked with the provided attribute.
         member this.FindLastOne(attr: Attr) : option<Symbol> =
             this.SymbolSeq()
@@ -214,6 +221,10 @@ module Common =
         // A sequence over all symbols with the given attribute.
         member this.FindAll(attr: Attr) : seq<Symbol> =
             this.SymbolSeq() |> Seq.filter (this.Has(attr))
+
+        // Given a symbol, find an attribute satisfying the predicate =
+        member this.Search(symbol: Symbol, predicate: Attr -> bool) : option<Attr> =
+            this.AttrSeq(symbol) |> Seq.tryFind predicate
 
     // The Compiler Context.
     // This class is a container for compiler queries; methods that can be called
@@ -238,7 +249,19 @@ module Common =
         // What name should be used for this symbol during code generation?
         member this.GenerationName(symbol: Symbol) : string =
             // FIXME: this implemetation doesn't consider attributes ...
-            this.Renamer.UniqueNameOf(symbol)
+            let result =
+                this.Marker.Search(
+                    symbol,
+                    // Create those terrible isVariant functions?
+                    fun a ->
+                        match a with
+                        | Extern _ -> true
+                        | _ -> false
+                )
+
+            match result with
+            | Some (Extern (_, name)) -> name
+            | _ -> this.Renamer.UniqueNameOf(symbol)
 
         // Maybe find the entry point of the program for code generation.
         // The entry point doesn't exist if the user hasn't supplied one.
@@ -478,11 +501,19 @@ module Parser =
 
         let builtinAttr = choice [ !@ "Add" >>% Add ] |>> Builtin
 
+        let externAttr =
+            tuple2
+                (choice [ !@ "Import" >>% Import
+                          !@ "Export" >>% Export ])
+                (!@ "\"" >>. charsTillString "\"" true 1337)
+            |>> Extern
+
         let inner =
             choice [ !@ "Whatever" >>% Whatever
                      !@ "Entry" >>% Entry
                      !@ "Inline" >>. inlineAttr
-                     !@ "Builtin" >>. builtinAttr ]
+                     !@ "Builtin" >>. builtinAttr
+                     !@ "Extern" >>. externAttr ]
 
         !@ "![" >>. inner .>> !@ "]"
 
