@@ -23,6 +23,12 @@ module Common =
     // Precedence of an operator.
     type Precedence = int
 
+    // Inlining information.
+    type Inline =
+        | Always
+        | Never
+        | Hint
+
     // Export type.
     type Extern =
         | Import
@@ -34,8 +40,8 @@ module Common =
     // the same order they appear in the program.
     type Attr =
         | Whatever // For testing purposes :3
-        | Inline
         | Entry
+        | Inline of Inline
         | Extern of Extern * Name
         | Builtin of list<Name>
         | Infix of Associativity * Precedence
@@ -180,15 +186,15 @@ module Common =
                 directory.Add(symbol, HashSet())
 
             match attr with
-            | Entry -> directory[ symbol ].Add(attr) |> ignore
-
-            | _ -> failwithf "ICE: attribute `%A` is not yet supported" attr
+            | _ -> directory[ symbol ].Add(attr) |> ignore
+        // | _ -> failwithf "ICE: attribute `%A` is not yet supported" attr
 
         // Does this symbol have the following attribute?
         member this.Has (attr: Attr) (symbol: Symbol) : bool =
-            // NOTE: Do we need to defend against rogue symbols here?
-            // Should Context take care of it?
-            directory[ symbol ].Contains(attr)
+            if directory.ContainsKey(symbol) then
+                directory[ symbol ].Contains(attr)
+            else
+                false
 
         // Sequence of all symbols.
         member this.SymbolSeq() : seq<Symbol> =
@@ -450,9 +456,19 @@ module Parser =
 
     // Parse a Chimera attribute, this is usually added on top of functions and types.
     let attr: Parser<Attr> =
+        let inlineAttr =
+            choice [ !@ "Always" >>% Always
+                     !@ "Never" >>% Never
+                     !@ "Hint" >>% Hint ]
+            |> opt
+            // Is this a sane default?
+            |>> Option.defaultValue Hint
+            |>> Inline
+
         let inner =
             choice [ !@ "Whatever" >>% Whatever
-                     !@ "Entry" >>% Entry ]
+                     !@ "Entry" >>% Entry
+                     !@ "Inline" >>. inlineAttr ]
 
         !@ "![" >>. inner .>> !@ "]"
 
@@ -722,12 +738,33 @@ module Generator =
                 this.Translate(fn, term)
 
         // Map the function parameter symbols to LLVM values for later use.
-        member this.RegisterParams(fn: LLVMValueRef, params': list<Symbol>) =
+        member this.RegisterParams(symbol: Symbol, params': list<Symbol>) =
+            let fn = this.ValueOf(symbol)
+
             let aux i param =
                 let llParam = LLVM.GetParam(fn, uint i)
                 this.SetValue(param, llParam)
 
             List.iteri aux params'
+
+        member this.AddInliningInfo(symbol: Symbol) =
+            let fn = this.ValueOf(symbol)
+            let lcx = LLVM.GetModuleContext(module')
+
+            let aux name =
+                let kind = LLVM.GetEnumAttributeKindForName(name, String.length name)
+                // FIXME: I'm not sure what the last parameter does.
+                let attr = LLVM.CreateEnumAttribute(lcx, kind, 0uL)
+                LLVM.AddAttributeAtIndex(fn, LLVMAttributeIndex.LLVMAttributeFunctionIndex, attr)
+
+            if ctx.Marker.Has (Inline Always) symbol then
+                aux "alwaysinline"
+
+            if ctx.Marker.Has (Inline Never) symbol then
+                aux "noinline"
+
+            if ctx.Marker.Has (Inline Hint) symbol then
+                aux "inlinehint"
 
         // Emit a Kernel Def inside the LLVM module.
         member this.Emit(def: Def) =
@@ -737,7 +774,10 @@ module Generator =
                 let name = ctx.GenerationName(symbol)
                 let fn = LLVM.AddFunction(module', name, type')
                 this.SetValue(symbol, fn)
-                this.RegisterParams(fn, params')
+
+                this.RegisterParams(symbol, params')
+                this.AddInliningInfo(symbol)
+
                 let entry = LLVM.AppendBasicBlock(fn, "entry")
                 LLVM.PositionBuilderAtEnd(builder, entry)
                 this.Translate(fn, body)
