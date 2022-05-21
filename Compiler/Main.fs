@@ -34,6 +34,9 @@ module Common =
         | Import
         | Export
 
+    // Compiler builtins.
+    type Builtin = | Add
+
     // Enumeration of Chimera attributes.
     // The syntax is a free form list of CamelCase names seperated by spaces,
     // and enclosed in `![ ... ]`. Attribute "arguments" are represented in
@@ -43,7 +46,7 @@ module Common =
         | Entry
         | Inline of Inline
         | Extern of Extern * Name
-        | Builtin of list<Name>
+        | Builtin of Builtin
         | Infix of Associativity * Precedence
         | Prefix of Precedence
         | Postfix of Precedence
@@ -275,7 +278,9 @@ module AST =
         | Call of Tail * Name * list<Expr>
 
     // Enumeration of Chimera Items.
-    type Item = Function of Name * list<Name * Ann> * Ann * Expr
+    type Item =
+        | Function of Name * list<Name * Ann> * Ann * Expr
+        | Signature of Name * Ann
 
     // The Abstract Syntax Tree.
     type IR =
@@ -450,8 +455,14 @@ module Parser =
 
     // Parse a function item.
     let item: Parser<Item> =
-        tuple4 name (tupled param) (colon >>. ann) (equal >>. expr)
-        |>> Function
+        let functionItem =
+            tuple4 name (tupled param) (colon >>. ann) (equal >>. expr)
+            |>> Function
+
+        let signatureItem = tuple2 name (colon >>. ann) |>> Signature
+
+        choice [ attempt functionItem
+                 signatureItem ]
         |> sc
 
     // Parse a Chimera attribute, this is usually added on top of functions and types.
@@ -465,14 +476,19 @@ module Parser =
             |>> Option.defaultValue Hint
             |>> Inline
 
+        let builtinAttr = choice [ !@ "Add" >>% Add ] |>> Builtin
+
         let inner =
             choice [ !@ "Whatever" >>% Whatever
                      !@ "Entry" >>% Entry
-                     !@ "Inline" >>. inlineAttr ]
+                     !@ "Inline" >>. inlineAttr
+                     !@ "Builtin" >>. builtinAttr ]
 
         !@ "![" >>. inner .>> !@ "]"
 
     // Ask the Compiler Context to mark this item with its attribute.
+    // This is done right after parsing the item itself.
+    // FIXME: this doesn't work with recursive operators.
     let registerAttr (attr: option<Attr>, item: Item) : Parser<Item> =
         let aux (name: Name) (ctx: Context) =
             let symbol = ctx.Renamer.ForwardBind(name)
@@ -482,8 +498,12 @@ module Parser =
 
             preturn item
 
-        match item with
-        | Function (name, _, _, _) -> getUserState >>= aux name
+        getUserState
+        >>= aux (
+            match item with
+            | Function (name, _, _, _) -> name
+            | Signature (name, _) -> name
+        )
 
     // Transform an itemKind parser into one that supports optional attributes.
     let attrThenItem: Parser<Item> = tuple2 (opt attr) item >>= registerAttr
@@ -504,7 +524,6 @@ module Parser =
         | Failure (error, _, _) -> failwith error
 
 module Kernel =
-    open System.Collections.Generic
     open Common
 
     // First level of the ANF hiearchy; allowed in Expr and the Return Term.
@@ -518,6 +537,7 @@ module Kernel =
     // Second level of the ANF hiearchy; not allowed in Value but used in a Binding's RHS.
     type Expr =
         | Value of Value
+        | Add of Symbol * Symbol
         | Call of Tail * Symbol * list<Symbol>
 
     // Third level of the ANF hiearchy; the highest recursive representation.
@@ -527,7 +547,9 @@ module Kernel =
         | Cond of Expr * Term * Term
 
     // Top-level definitions.
-    type Def = Function of Symbol * list<Symbol> * Term
+    type Def =
+        | Function of Symbol * list<Symbol> * Term
+        | Signature of Symbol
 
     // The Kernel IR.
     type IR =
@@ -613,6 +635,10 @@ module Elaborator =
                 let result = ctx.Renamer.Fresh()
                 let flatBody = this.Flatten(body, result, (Return(Symbol(result))))
                 Function(symbol, symbols, flatBody)
+            | AST.Signature (name, ann) ->
+                let symbol = ctx.Renamer.Bind(name)
+                ctx.Typer.SetType(symbol, toType ann)
+                Signature symbol
 
     // Transform an AST into Kernel IR.
     let kernel (ctx, ast) =
@@ -625,11 +651,43 @@ module Elaborator =
         (ctx, kir)
 
 // Collection of Kernel -> Kernel transformations.
-module Analyser =
+module Identity =
     open Common
     open Kernel
 
-    let expandBuiltins (ctx: Context, k: IR) : IR = failwith ""
+    type Passes(ctx: Context) =
+        member this.ExpandBuiltins(kir: IR) : IR =
+            let aux def =
+                match def with
+                | Signature symbol when ctx.Marker.Has (Builtin Common.Add) symbol ->
+                    let (input, output) =
+                        match ctx.Typer.TypeOf(symbol) with
+                        | Arrow (x, y) -> (x, y)
+                        | _ -> failwith "Error: the `Add` builtin is a function value."
+
+                    if not (List.length input = 2) then
+                        failwith "Error: the `Add` builtin takes exactly two parameters."
+
+                    let params' =
+                        [ for type' in input ->
+                              let param = ctx.Renamer.Fresh()
+                              ctx.Typer.SetType(param, type')
+                              param ]
+
+                    let (lhs, rhs) = (List.head params', List.last params')
+                    let result = ctx.Renamer.Fresh()
+
+                    let body = Bind(result, Add(lhs, rhs), Return(Symbol(result)))
+                    Function(symbol, params', body)
+
+                | other -> other
+
+            List.map aux kir.defs |> IR.make
+
+        member this.All = this.ExpandBuiltins
+
+    // Run of the Identity passes.
+    let passes (ctx, kir) = (ctx, Passes(ctx).All(kir))
 
 module Generator =
     open System.Collections.Generic
@@ -698,6 +756,7 @@ module Generator =
         member this.Eval(expr: Expr) : LLVMValueRef =
             match expr with
             | Value value -> this.Convert(value)
+            | Add (lhs, rhs) -> LLVM.BuildAdd(builder, this.ValueOf(lhs), this.ValueOf(rhs), "")
             | Call (tail, symbol, args) ->
                 let name = ctx.GenerationName(symbol)
                 let fn = this.ValueOf(symbol)
@@ -781,10 +840,18 @@ module Generator =
                 let entry = LLVM.AppendBasicBlock(fn, "entry")
                 LLVM.PositionBuilderAtEnd(builder, entry)
                 this.Translate(fn, body)
+            | Signature symbol ->
+                // FIXME: refactor this part.
+                let type' = ctx.Typer.TypeOf(symbol) |> toLLType
+                let name = ctx.GenerationName(symbol)
+                let fn = LLVM.AddFunction(module', name, type')
+                this.SetValue(symbol, fn)
 
     let execute (ctx, kir) =
         let module' = LLVM.ModuleCreateWithName("chimera")
         let emitter = Emitter(ctx, module')
+
+        printfn "%A" kir
 
         for def in kir.defs do
             emitter.Emit(def)
@@ -821,6 +888,7 @@ let main _ =
 
     Parser.parse stream
     |> Elaborator.kernel
+    |> Identity.passes
     |> Generator.execute
     |> printfn "program returned: %A"
 

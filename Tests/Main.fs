@@ -6,6 +6,7 @@ open Compiler.Common
 open Compiler.Parser
 open Compiler.AST
 open Compiler.Elaborator
+open Compiler.Identity
 open Compiler.Generator
 
 [<Test>]
@@ -27,7 +28,7 @@ let run program =
     let ctx = Context()
 
     match runParserOnString ast ctx "Test" program with
-    | Success (tree, _, _) -> (ctx, tree) |> kernel |> execute
+    | Success (tree, _, _) -> (ctx, tree) |> kernel |> passes |> execute
     | Failure (error, _, _) ->
         printfn "%s" error
         failwith "failed to parse a testing program; not so good eh?"
@@ -79,5 +80,15 @@ let ShadowedDefinitionsWithAttrs () =
         "main(): Int = 13\n\
         ![Entry]\n\
         main(): Int = 42\n"
+
+    Assert.AreEqual(42, run input)
+
+[<Test>]
+let BuiltinAdd () =
+    let input =
+        "![Builtin Add]\n\
+        add: (Int, Int) -> Int\n\
+        ![Entry]\n\
+        main(): Int = add(21, 21)\n"
 
     Assert.AreEqual(42, run input)
