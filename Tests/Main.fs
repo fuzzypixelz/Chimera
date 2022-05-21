@@ -2,6 +2,7 @@ module Chimera.Tests
 
 open NUnit.Framework
 open FParsec
+open Compiler.Common
 open Compiler.Parser
 open Compiler.AST
 open Compiler.Elaborator
@@ -12,9 +13,9 @@ let SimpleFunctionItem () =
     let input = "first (x: Int, y: Int): Int = x\n"
 
     let expected =
-        IR.make [ Item.make Option.None (Function("first", [ ("x", Int); ("y", Int) ], Int, (Name "x"))) ]
+        IR.make [ Function("first", [ ("x", Int); ("y", Int) ], Int, (Name "x")) ]
 
-    match run ast input with
+    match runParserOnString ast (Context()) "" input with
     | Success (actual, _, _) -> Assert.AreEqual(expected, actual)
     | Failure (error, _, _) ->
         printfn "%s" error
@@ -23,15 +24,17 @@ let SimpleFunctionItem () =
 // Helper function to JIT compile and execute a program from a string.
 // The program is assumed to be syntactically correct.
 let run program =
-    match runParserOnString ast () "Test" program with
-    | Success (tree, _, _) -> tree |> kernel |> execute
+    let ctx = Context()
+
+    match runParserOnString ast ctx "Test" program with
+    | Success (tree, _, _) -> (ctx, tree) |> kernel |> execute
     | Failure (error, _, _) ->
         printfn "%s" error
         failwith "failed to parse a testing program; not so good eh?"
 
 [<Test>]
 let FunctionCalls () =
-    let input = 
+    let input =
         "fst(x: Int, y: Int): Int = x\n\
         ![Entry]\n\
         main(): Int = fst(42, 69)\n"
@@ -68,3 +71,13 @@ let PassingFunctionToFunction () =
 
 [<Test>] // TODO.
 let TailCallElimination () = Assert.Pass()
+
+[<Test>]
+let ShadowedDefinitionsWithAttrs () =
+    let input =
+        // "![Entry]
+        "main(): Int = 13\n\
+        ![Entry]\n\
+        main(): Int = 42\n"
+
+    Assert.AreEqual(42, run input)

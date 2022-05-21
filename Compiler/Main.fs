@@ -2,6 +2,7 @@
 
 module Common =
     open System.Collections.Generic
+    open FParsec
 
     // The type of variable and function names.
     type Name = string
@@ -15,7 +16,7 @@ module Common =
         | Boolean of bool
 
     type Associativity =
-        | None
+        | Nothing
         | Left
         | Right
 
@@ -36,20 +37,45 @@ module Common =
         | Inline
         | Entry
         | Extern of Extern * Name
-        | Intrinsic of list<Name>
+        | Builtin of list<Name>
         | Infix of Associativity * Precedence
         | Prefix of Precedence
         | Postfix of Precedence
+
+    // Enumeration of Chimera's types.
+    type Type =
+        | Int
+        | Word
+        | Bool
+        | Arrow of list<Type> * Type
+
+    // The Typing Context.
+    // This is seperated out into two parts since we choose to keep
+    // the names of functions for "nicer" object file symbols.
+    type Typer() =
+        let variables = Dictionary<Symbol, Type>(420)
+
+        // Get the type of a variable.
+        member this.TypeOf(variable: Symbol) : Type = variables.GetValueOrDefault(variable)
+
+        // Set the type of a vatiable.
+        member this.SetType(variable: Symbol, type': Type) = variables.Add(variable, type')
 
     // Small utility class for renaming variables inside functions.
     // This is a very thin wrapper around a Dictionnary and doesn't do much.
     // It mainly serves as documenation for myself; to keep my sanity.
     type Renamer() =
+        // What is the current symbol for a give name?
         let symbols = Dictionary<Name, Symbol>(42)
 
         // An additional "inverse" map to remember the original name of each unique Symbol.
         // This is necessary for (efficiently) implementing the `NameOf` method.
         let names = Dictionary<Symbol, Name>(42)
+
+        // Sigh.
+        // This the Queue (FIFO) of forwardly-bound symbols.
+        // All the symbols here will be deqeued during the "actual" binding.
+        let forwardedSymbols = Queue<Name * Symbol>()
 
         // We need a fresh symbol each time we perform a bind.
         // This is because Name's can be reused so we cannot rely on symbols.Count.
@@ -66,12 +92,46 @@ module Common =
         // Generates a new symbol for the given name and registers the mapping.
         // Any subsequent calls with the same name will overrite the old name.
         // Used primarily for introducing new names with let-expression.
-        // The counter starts from 0
+        // The counter starts from 0.
         member this.Bind(name: Name) : Symbol =
-            let symbol = this.Fresh()
+            let symbol =
+                this.ForwardSymbolOf(name)
+                |> Option.defaultValue (this.Fresh())
+
             symbols[name] <- symbol
             names[symbol] <- name
             symbol
+
+        // Imagine we're dealing with the following "bad" code:
+        //     ![Builtin Add]
+        //     add : (Int, Int) -> Int
+        //     ![Builtin Add]
+        //     add : (Word, Word) -> Word
+        // This is why we need to mark items with attributes by symbol and not name.
+        // Marking however is done during parsing because of `Infix` and such shenanigans.
+        // This means that we need to assign symbols to some names way before Elaboration,
+        // which is where all names are eliminated.
+        // The requirement is thus the ability to say:
+        // "I want to reserve a symbol for this name until you effectively bind it."
+        // After the eventual call to `Bind`, it should be as if we never did this operation.
+        // Think of it as asking for the future symbol of a name.
+        member this.ForwardBind(name: Name) : Symbol =
+            let symbol = this.Fresh()
+            forwardedSymbols.Enqueue((name, symbol))
+            symbol
+
+        // Was this name forward-bound? If so return the symbol.
+        member this.ForwardSymbolOf(name: Name) : option<Symbol> =
+            if forwardedSymbols.Count > 0 then
+                let (firstName, symbol) = forwardedSymbols.Peek()
+
+                if firstName = name then
+                    forwardedSymbols.Dequeue() |> ignore
+                    Some(symbol)
+                else
+                    None
+            else
+                None
 
         // Retrieves the last bound of the given name.
         // For example, if one binds `x` twice in `let x = 1 in let x = 2 in x`,
@@ -102,6 +162,80 @@ module Common =
         // is also injective. QED(?)
         member this.UniqueNameOf(symbol: Symbol) : Name =
             this.OriginalNameOf(symbol) + string symbol
+
+    // The Attribute logic handler.
+    // Attributes cannot be applied to just about any item, and they cannot be
+    // arbitrarily composed. For example ![Inline] and ![Entry] don't sense
+    // together; even though it's valid syntax.
+    // This class thus allows its users to query for specific attributes on a
+    // symbols. Moreover, this is naturally where the Symbol -> Attr mapping is
+    // stored, so we should defend against invalid combinations of attributes.
+    type Marker() =
+        let directory = Dictionary<Symbol, HashSet<Attr>>(42)
+
+        // Associate the given symbol with an attribute.
+        // This will raise an exception in case of logical errors.
+        member this.Mark(symbol: Symbol, attr: Attr) =
+            if not (directory.ContainsKey(symbol)) then
+                directory.Add(symbol, HashSet())
+
+            match attr with
+            | Entry -> directory[ symbol ].Add(attr) |> ignore
+
+            | _ -> failwithf "ICE: attribute `%A` is not yet supported" attr
+
+        // Does this symbol have the following attribute?
+        member this.Has (attr: Attr) (symbol: Symbol) : bool =
+            // NOTE: Do we need to defend against rogue symbols here?
+            // Should Context take care of it?
+            directory[ symbol ].Contains(attr)
+
+        // Sequence of all symbols.
+        member this.SymbolSeq() : seq<Symbol> =
+            seq {
+                for symbol in directory.Keys do
+                    yield symbol
+            }
+
+        // Give me the last element that's marked with the provided attribute.
+        member this.FindLastOne(attr: Attr) : option<Symbol> =
+            this.SymbolSeq()
+            |> Seq.tryFindBack (this.Has(attr))
+
+        // A sequence over all symbols with the given attribute.
+        member this.FindAll(attr: Attr) : seq<Symbol> =
+            this.SymbolSeq() |> Seq.filter (this.Has(attr))
+
+    // The Compiler Context.
+    // This class is a container for compiler queries; methods that can be called
+    // from several points down the pipeline. This works by composing together the
+    // Renamer, Typer and Marker classes to handle the logical interactions between.
+    // For example, an attribute like ![NoMangle] might override the name we will use
+    // during code generation; something like ![Infix ...] will change the way we parse
+    // the source code; and ![Builtin Add Int] would make the elaborator generate a
+    // specific term for a function's body.
+    type Context() =
+
+        // The composing objects of Context.
+        member val OperatorParser = OperatorPrecedenceParser()
+        member val Marker = Marker()
+        member val Renamer = Renamer()
+        member val Typer = Typer()
+
+        // Should we generate code for the give symbol?
+        // This can be influenced by DCE, ![Cfg ...] for example.
+        member this.ShouldGenerate(symbol: Symbol) : bool = failwith "todo"
+
+        // What name should be used for this symbol during code generation?
+        member this.GenerationName(symbol: Symbol) : string =
+            // FIXME: this implemetation doesn't consider attributes ...
+            this.Renamer.UniqueNameOf(symbol)
+
+        // Maybe find the entry point of the program for code generation.
+        // The entry point doesn't exist if the user hasn't supplied one.
+        member this.FindEntry() : option<Name> =
+            this.Marker.FindLastOne(Entry)
+            |> Option.map this.GenerationName
 
     // Fancy operator for doing C# implicit type coversion.
     // NOTE: relying on the compiler to do it for you fails in some cases,
@@ -134,14 +268,8 @@ module AST =
         | Cond of Expr * Expr * Expr
         | Call of Tail * Name * list<Expr>
 
-    // Enumeration of Item kinds.
-    type ItemKind = Function of Name * list<Name * Ann> * Ann * Expr
-
-    // Top-level Item.
-    type Item =
-        { attr: option<Attr>
-          kind: ItemKind }
-        static member make attr kind = { attr = attr; kind = kind }
+    // Enumeration of Chimera Items.
+    type Item = Function of Name * list<Name * Ann> * Ann * Expr
 
     // The Abstract Syntax Tree.
     type IR =
@@ -159,7 +287,7 @@ module Parser =
     // Yes, no emojis for now :(
 
     // Type synonym for less typing :^)
-    type Parser<'a> = Parser<'a, unit>
+    type Parser<'a> = Parser<'a, Context>
 
     // Defines Chimera's Horizontal space characters.
     let isHSpace = isAnyOf [| ' '; '\t' |]
@@ -306,11 +434,16 @@ module Parser =
 
         expr
 
+    // Parse an infix, prefex or postfix expression.
+    let operator: Parser<Expr> =
+        getUserState
+        >>= fun ctx -> ctx.OperatorParser.ExpressionParser
+
     // Parse a function parameter.
     let param: Parser<Name * Ann> = tuple2 (name .>> colon) ann
 
     // Parse a function item.
-    let itemKind: Parser<ItemKind> =
+    let item: Parser<Item> =
         tuple4 name (tupled param) (colon >>. ann) (equal >>. expr)
         |>> Function
         |> sc
@@ -323,42 +456,40 @@ module Parser =
 
         !@ "![" >>. inner .>> !@ "]"
 
+    // Ask the Compiler Context to mark this item with its attribute.
+    let registerAttr (attr: option<Attr>, item: Item) : Parser<Item> =
+        let aux (name: Name) (ctx: Context) =
+            let symbol = ctx.Renamer.ForwardBind(name)
+
+            Option.map (fun attr -> ctx.Marker.Mark(symbol, attr)) attr
+            |> ignore
+
+            preturn item
+
+        match item with
+        | Function (name, _, _, _) -> getUserState >>= aux name
+
     // Transform an itemKind parser into one that supports optional attributes.
-    let item: Parser<Item> = pipe2 (opt attr) itemKind Item.make
+    let attrThenItem: Parser<Item> = tuple2 (opt attr) item >>= registerAttr
 
     // Parse the full syntax tree.
-    let ast: Parser<IR> = many item .>> eof |>> IR.make
+    let ast: Parser<IR> = many attrThenItem .>> eof |>> IR.make
 
     // Helper function for running the parser
+    // Weirdly enough, this is where the Compiler context is created.
     let parse s =
-        let result = runParserOnStream ast () "" s (System.Text.ASCIIEncoding())
+        let ctx = Context()
+        ctx.OperatorParser.TermParser <- expr
+
+        let result = runParserOnStream ast ctx "" s (System.Text.ASCIIEncoding())
 
         match result with
-        | Success (tree, _, _) -> tree
+        | Success (tree, _, _) -> (ctx, tree)
         | Failure (error, _, _) -> failwith error
 
 module Kernel =
     open System.Collections.Generic
     open Common
-
-    // Enumeration of Chimera's types.
-    type Type =
-        | Int
-        | Word
-        | Bool
-        | Arrow of list<Type> * Type
-
-    // The Typing Context.
-    // This is seperated out into two parts since we choose to keep
-    // the names of functions for "nicer" object file symbols.
-    type Context() =
-        let variables = Dictionary<Symbol, Type>(420)
-
-        // Get the type of a variable.
-        member this.TypeOf(variable: Symbol) : Type = variables.GetValueOrDefault(variable)
-
-        // Set the type of a vatiable.
-        member this.SetType(variable: Symbol, type': Type) = variables.Add(variable, type')
 
     // First level of the ANF hiearchy; allowed in Expr and the Return Term.
     type Value =
@@ -380,48 +511,40 @@ module Kernel =
         | Cond of Expr * Term * Term
 
     // Top-level definitions.
-    type Def = Function of option<Attr> * Symbol * list<Symbol> * Term
+    type Def = Function of Symbol * list<Symbol> * Term
 
     // The Kernel IR.
     type IR =
-        { defs: list<Def>
-          ctx: Context
-          renamer: Renamer }
-        static member make defs ctx renamer =
-            { defs = defs
-              ctx = ctx
-              renamer = renamer }
+        { defs: list<Def> }
+        static member make defs = { defs = defs }
 
 module Elaborator =
-    open Common
     open AST
+    open Common
     open Kernel
 
     // Convert an AST annotation into a Kernel IR type.
     // NOTE: At the moment, this is unremarkable administrative work,
     // Is the seperation between Type and Ann really that important?
-    let rec toType ann =
+    let rec toType (ann: Ann) : Type =
         match ann with
         | AST.Int -> Int
         | AST.Word -> Word
         | AST.Bool -> Bool
         | AST.Arrow (input, output) -> Arrow(List.map toType input, toType output)
 
-    type Translator() =
+    // ???
+    type Translator(ctx: Context) =
+        // Holds the types of all functions and variables within the current "module".
+        // The resulting context is very useful for the code generation phase.
+        // member val Typer = Typer()
+
         // Generates unique symbols for variables.
         // Re-using the same structure and changing it place *should* lead
         // to better performance as we're avoiding a number of allocations.
         // However, I can't say without some benchmarks.
-        let renamer = Renamer()
-
-        // Holds the types of all functions and variables within the current "module".
-        let ctx = Context()
-
-        // The resulting context is very useful for the code generation phase.
-        member this.Ctx = ctx
-
         // Sometimes we wish to refer to the original names of symbols.
-        member this.Renamer = renamer
+        // member val Renamer = Renamer()
 
         // Transform an AST Expr into a Term.
         // Beware, this function's logic is quite involved; we are essentially transforming a
@@ -437,18 +560,18 @@ module Elaborator =
 
             match expr with
             | AST.Literal literal -> Value(Literal literal) |> bind
-            | AST.Name name -> Value(Symbol(renamer.SymbolOf(name))) |> bind
+            | AST.Name name -> Value(Symbol(ctx.Renamer.SymbolOf(name))) |> bind
             | AST.Bind (name, expr, body) ->
-                let boundResult = renamer.Bind(name)
+                let boundResult = ctx.Renamer.Bind(name)
                 let bodyTerm = this.Flatten(body, result, cont)
                 this.Flatten(expr, boundResult, bodyTerm)
             | AST.Call (tail, name, args) ->
-                let results = [ for _ in 1 .. List.length args -> renamer.Fresh() ]
+                let results = [ for _ in 1 .. List.length args -> ctx.Renamer.Fresh() ]
                 let aux state (expr, result) = this.Flatten(expr, result, state)
-                let fnSymbol = renamer.SymbolOf(name)
+                let fnSymbol = ctx.Renamer.SymbolOf(name)
                 List.fold aux (bind (Call(tail, fnSymbol, results))) (List.zip args results)
             | AST.Cond (cond, then', else') ->
-                let condResult = renamer.Fresh()
+                let condResult = ctx.Renamer.Fresh()
                 let thenTerm = this.Flatten(then', result, cont)
                 let elseTerm = this.Flatten(else', result, cont)
                 let nextTerm = Cond(Value(Symbol(condResult)), thenTerm, elseTerm)
@@ -456,33 +579,41 @@ module Elaborator =
 
         // Transform an Item into a Def.
         member this.Definition(item: Item) =
-            match item.kind with
+            match item with
             | AST.Function (name, params', return', body) ->
 
                 // Rename function parameter symbols and register their types.
                 let aux (param, ann) =
-                    let symbol = renamer.Bind(param)
+                    let symbol = ctx.Renamer.Bind(param)
                     let type' = toType ann
-                    ctx.SetType(symbol, type')
+                    ctx.Typer.SetType(symbol, type')
                     (symbol, type')
 
                 let (symbols, types) = List.unzip <| List.map aux params'
 
-                let symbol = renamer.Bind(name)
-                ctx.SetType(symbol, Arrow(types, toType return'))
+                let symbol = ctx.Renamer.Bind(name)
+                ctx.Typer.SetType(symbol, Arrow(types, toType return'))
 
-                let result = renamer.Fresh()
+                let result = ctx.Renamer.Fresh()
                 let flatBody = this.Flatten(body, result, (Return(Symbol(result))))
-                Function(item.attr, symbol, symbols, flatBody)
+                Function(symbol, symbols, flatBody)
 
     // Transform an AST into Kernel IR.
-    let kernel ast =
-        let translator = Translator()
+    let kernel (ctx, ast) =
+        let translator = Translator(ctx)
 
-        IR.make
-        <| List.map translator.Definition ast.items
-        <| translator.Ctx
-        <| translator.Renamer
+        let kir =
+            List.map translator.Definition ast.items
+            |> IR.make
+
+        (ctx, kir)
+
+// Collection of Kernel -> Kernel transformations.
+module Analyser =
+    open Common
+    open Kernel
+
+    let expandBuiltins (ctx: Context, k: IR) : IR = failwith ""
 
 module Generator =
     open System.Collections.Generic
@@ -523,14 +654,10 @@ module Generator =
             let llBool = if b then 1uL else 0uL
             LLVM.ConstInt(toLLType Bool, llBool, true)
 
-    type Emitter(ctx: Context, renamer: Renamer, module': LLVMModuleRef) =
+    type Emitter(ctx: Context, module': LLVMModuleRef) =
         // Keep track of the LLVM values corresponding to a given symbol.
         let llValues = Dictionary<Symbol, LLVMValueRef>(42)
         let builder = LLVM.CreateBuilder()
-
-        // Optionally use an entry point in the program.
-        // let mutable entry = Option.None
-        member val Entry = Option.None with get, set
 
         // What is the LLVM value for this symbol?
         member this.ValueOf(symbol: Symbol) : LLVMValueRef =
@@ -556,7 +683,7 @@ module Generator =
             match expr with
             | Value value -> this.Convert(value)
             | Call (tail, symbol, args) ->
-                let name = renamer.UniqueNameOf(symbol)
+                let name = ctx.GenerationName(symbol)
                 let fn = this.ValueOf(symbol)
                 let llArgs = List.map this.ValueOf args |> List.toArray
                 let call = LLVM.BuildCall(builder, fn, llArgs, name)
@@ -602,21 +729,12 @@ module Generator =
 
             List.iteri aux params'
 
-        member this.HandleAttr(attr: option<Attr>, symbol: Symbol) =
-            let aux a =
-                match a with
-                | Entry -> this.Entry <- Some(renamer.UniqueNameOf(symbol))
-                | _ -> failwithf "attribute `%A` is not yet implemented" attr
-
-            Option.map aux attr |> ignore
-
         // Emit a Kernel Def inside the LLVM module.
         member this.Emit(def: Def) =
             match def with
-            | Function (attr, symbol, params', body) ->
-                this.HandleAttr(attr, symbol)
-                let type' = ctx.TypeOf(symbol) |> toLLType
-                let name = renamer.UniqueNameOf(symbol)
+            | Function (symbol, params', body) ->
+                let type' = ctx.Typer.TypeOf(symbol) |> toLLType
+                let name = ctx.GenerationName(symbol)
                 let fn = LLVM.AddFunction(module', name, type')
                 this.SetValue(symbol, fn)
                 this.RegisterParams(fn, params')
@@ -624,11 +742,11 @@ module Generator =
                 LLVM.PositionBuilderAtEnd(builder, entry)
                 this.Translate(fn, body)
 
-    let execute program =
+    let execute (ctx, kir) =
         let module' = LLVM.ModuleCreateWithName("chimera")
-        let emitter = Emitter(program.ctx, program.renamer, module')
+        let emitter = Emitter(ctx, module')
 
-        for def in program.defs do
+        for def in kir.defs do
             emitter.Emit(def)
 
         LLVM.DumpModule(module')
@@ -636,7 +754,7 @@ module Generator =
         let mutable error = null
 
         !> LLVM.VerifyModule(module', LLVMVerifierFailureAction.LLVMAbortProcessAction, &error)
-        |> expect "invalid module."
+        |> expect error
 
         let mutable engine = LLVMExecutionEngineRef(0)
 
@@ -649,13 +767,16 @@ module Generator =
 
             LLVM.GenericValueToInt(ret, false)
 
-        Option.map aux emitter.Entry
+        let maybeEntry = ctx.FindEntry()
+
+        Option.map aux maybeEntry
         |> Option.defaultValue 0uL
 
 open System.IO
 
 [<EntryPoint>]
 let main _ =
+    // TODO: Implement a proper Driver module.
     let stream = File.Open("scratchpad.chi", FileMode.Open)
 
     Parser.parse stream
