@@ -208,10 +208,13 @@ module Common =
 
         // Sequence of attributes of a symbol.
         member this.AttrSeq(symbol: Symbol) : seq<Attr> =
-            seq {
-                for attr in directory[symbol] do
-                    yield attr
-            }
+            if directory.ContainsKey(symbol) then
+                seq {
+                    for attr in directory[symbol] do
+                        yield attr
+                }
+            else
+                Seq.empty
 
         // Give me the last element that's marked with the provided attribute.
         member this.FindLastOne(attr: Attr) : option<Symbol> =
@@ -249,7 +252,7 @@ module Common =
         // What name should be used for this symbol during code generation?
         member this.GenerationName(symbol: Symbol) : string =
             // FIXME: this implemetation doesn't consider attributes ...
-            let result =
+            let externResult =
                 this.Marker.Search(
                     symbol,
                     // Create those terrible isVariant functions?
@@ -259,8 +262,11 @@ module Common =
                         | _ -> false
                 )
 
-            match result with
+            let entryResult = this.Marker.Has (Entry) (symbol)
+
+            match externResult with
             | Some (Extern (_, name)) -> name
+            | _ when entryResult -> "main"
             | _ -> this.Renamer.UniqueNameOf(symbol)
 
         // Maybe find the entry point of the program for code generation.
@@ -876,39 +882,40 @@ module Generator =
                 let type' = ctx.Typer.TypeOf(symbol) |> toLLType
                 let name = ctx.GenerationName(symbol)
                 let fn = LLVM.AddFunction(module', name, type')
+                LLVM.SetLinkage(fn, LLVMLinkage.LLVMExternalLinkage)
                 this.SetValue(symbol, fn)
 
     let execute (ctx, kir) =
-        let module' = LLVM.ModuleCreateWithName("chimera")
+        let module' = LLVM.ModuleCreateWithName("scratchpad.chi")
         let emitter = Emitter(ctx, module')
-
-        printfn "%A" kir
 
         for def in kir.defs do
             emitter.Emit(def)
-
-        LLVM.DumpModule(module')
 
         let mutable error = null
 
         !> LLVM.VerifyModule(module', LLVMVerifierFailureAction.LLVMAbortProcessAction, &error)
         |> expect error
 
-        let mutable engine = LLVMExecutionEngineRef(0)
-
-        !> LLVM.CreateExecutionEngineForModule(&engine, module', &error)
+        !> LLVM.PrintModuleToFile(module', "scratchpad.ll", &error)
         |> expect error
 
-        let aux entry =
-            let main = LLVM.GetNamedFunction(module', entry)
-            let ret = LLVM.RunFunction(engine, main, [||])
+        async {
+            let clang =
+                System.Diagnostics.Process.Start(
+                    "clang",
+                    "-x ir \
+                        scratchpad.ll \
+                        -o scratchpad \
+                        -Wno-override-module"
+                )
 
-            LLVM.GenericValueToInt(ret, false)
-
-        let maybeEntry = ctx.FindEntry()
-
-        Option.map aux maybeEntry
-        |> Option.defaultValue 0uL
+            do! clang.WaitForExitAsync() |> Async.AwaitTask
+            let program = System.Diagnostics.Process.Start("./scratchpad")
+            do! program.WaitForExitAsync() |> Async.AwaitTask
+            return program.ExitCode
+        }
+        |> Async.RunSynchronously
 
 open System.IO
 
@@ -921,6 +928,6 @@ let main _ =
     |> Elaborator.kernel
     |> Identity.passes
     |> Generator.execute
-    |> printfn "program returned: %A"
+    |> printfn "program returned: %i"
 
     0

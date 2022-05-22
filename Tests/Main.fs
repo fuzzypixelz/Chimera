@@ -92,3 +92,23 @@ let BuiltinAdd () =
         main(): Int = add(21, 21)\n"
 
     Assert.AreEqual(42, run input)
+
+[<Test>]
+let CallExternPutchar () =
+    let input =
+        "![Extern Import \"putchar\"]\n\
+        putchar: (Int) -> Int\n\
+        ![Entry]\n\
+        main(): Int = putchar(42)\n"
+
+    Assert.AreEqual(42, run input)
+
+[<Test>]
+let CallExternAbs () =
+    let input =
+        "![Extern Import \"abs\"]\n\
+        abs: (Int) -> Int\n\
+        ![Entry]\n\
+        main(): Int = abs(-42)\n"
+
+    Assert.AreEqual(42, run input)

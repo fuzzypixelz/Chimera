@@ -3,5 +3,5 @@
 bin/
 obj/
 .fake
-Compiler/scratchpad.chi
+Compiler/scratchpad*
 Tests/TestResults/
