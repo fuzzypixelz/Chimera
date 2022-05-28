@@ -2,12 +2,12 @@ module Chimera.Tests
 
 open NUnit.Framework
 open FParsec
-open Compiler.Common
-open Compiler.Parser
-open Compiler.AST
-open Compiler.Elaborator
-open Compiler.Identity
-open Compiler.Generator
+open Chimera.Compiler.Common
+open Chimera.Compiler.Syntax
+open Chimera.Compiler.Parse
+open Chimera.Compiler.Elaborate
+open Chimera.Compiler.Transform
+open Chimera.Compiler.Generate
 
 [<Test>]
 let SimpleFunctionItem () =
@@ -70,13 +70,9 @@ let PassingFunctionToFunction () =
 
     Assert.AreEqual(42, run input)
 
-[<Test>] // TODO.
-let TailCallElimination () = Assert.Pass()
-
 [<Test>]
 let ShadowedDefinitionsWithAttrs () =
     let input =
-        // "![Entry]
         "main(): Int = 13\n\
         ![Entry]\n\
         main(): Int = 42\n"
@@ -110,5 +106,61 @@ let CallExternAbs () =
         abs: (Int) -> Int\n\
         ![Entry]\n\
         main(): Int = abs(-42)\n"
+
+    Assert.AreEqual(42, run input)
+
+[<Test>]
+let TailCallEliminationMatters () =
+    let input =
+        "![Builtin Eq]\n\
+        eq: (Int, Int) -> Bool\n\
+        ![Builtin Add]\n\
+        add: (Int, Int) -> Int\n\
+        count(start: Int, end: Int): Int =\n\
+            if eq(start, end)\n\
+            then 42\n\
+            else count(add(start, 1), end)\n\
+        ![Entry]\n\
+        main(): Int =\n\
+            count(0, 1000000000)"
+
+    // 139 is the process signal for a SEGFAULT.
+    // On UNIX at least? This "Test" is so very not-portable.
+    Assert.AreEqual(139, run input)
+
+[<Test>]
+let TailCallElimination () =
+    let input =
+        "![Builtin Eq]\n\
+        eq: (Int, Int) -> Bool\n\
+        ![Builtin Add]\n\
+        add: (Int, Int) -> Int\n\
+        count(start: Int, end: Int): Int =\n\
+            if eq(start, end)\n\
+            then 42\n\
+            else become count(add(start, 1), end)\n\
+        ![Entry]\n\
+        main(): Int =\n\
+            count(0, 1000000000)"
+
+    Assert.AreEqual(42, run input)
+
+[<Test>]
+let ArrayIndex () =
+    let input =
+        "![Entry]\n\
+        main(): Int = let array = [13, 42, 69] in array[1]"
+
+    Assert.AreEqual(42, run input)
+
+[<Test>]
+let ArrayLen () =
+    let input =
+        "![Builtin Len]\n\
+        len: ([Int]) -> Int\n\
+        ![Builtin Add]\n\
+        add: (Int, Int) -> Int\n\
+        ![Entry]\n\
+        main(): Int = let array = [0] in add(len(array), 41)"
 
     Assert.AreEqual(42, run input)
