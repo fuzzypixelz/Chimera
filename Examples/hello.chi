@@ -1,0 +1,30 @@
+![Extern Import "putchar"]
+putchar: (Char) -> Char
+
+![Builtin Add]
+-- TODO: implement infix operators through attributes.
+add: (Int, Int) -> Int
+
+![Builtin Eq]
+eq: (Int, Int) -> Bool
+
+![Builtin Len]
+-- TODO: handle left-recursion in annotations; 
+-- this will allow us to remove these parentheses.
+-- TODO: implement parametric polymorphism; 
+-- currently you have to define `len` for each array type.
+len: ([]Char) -> Int
+
+print(str: []Char, step: Int): Int =
+-- TODO: allow for local functions using lambda-lifting.
+-- this will be done through allowing items to be non-function
+-- values and then upgrading let-syntax to let [item] in expr.
+    if eq(step, len(str))
+    then 0 
+    else 
+        let tmp = putchar(str[step]) in 
+        become print(str, add(step, 1))
+
+![Entry]
+main(): Int =
+    print("Hello, Chimera!", 0)
