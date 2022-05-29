@@ -9,6 +9,7 @@ open Chimera.Compiler.Kernel
 // Is the seperation between Type and Ann really that important?
 let rec toType: Ann -> Type =
     function
+    | Syntax.Unit -> Unit
     | Syntax.Int -> Int
     | Syntax.Word -> Word
     | Syntax.Bool -> Bool

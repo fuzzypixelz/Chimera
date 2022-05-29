@@ -23,6 +23,7 @@ let expect msg err = if err then failwith msg
 // Translate a Kernel type into an LLVM type.
 let rec toLLType: Type -> LLVMTypeRef =
     function
+    | Unit -> LLVM.VoidType()
     | Int
     | Word -> LLVM.Int64Type()
     | Char -> LLVM.Int8Type()
@@ -62,6 +63,10 @@ and toLLParamType: Type -> LLVMTypeRef =
 // Create the LLVM representation of a Chimera literal.
 let toLLConst: Literal -> LLVMValueRef =
     function
+    // FIXME: this is a really silly way of doing this,
+    // but it should be the case that we never try to evaluate this.
+    // How to check though?
+    | Empty -> LLVMValueRef(0)
     | Integer i -> LLVM.ConstInt(toLLType Int, uint64 i, true)
     | Boolean b ->
         let llBool = if b then 1uL else 0uL
@@ -118,7 +123,7 @@ type Emitter(ctx: Context, module': LLVMModuleRef) =
                 // No need to do anything special with the return type.
                 List.map this.ValueOf args
 
-        LLVM.BuildCall(builder, fn, llArgs |> List.toArray, name)
+        LLVM.BuildCall(builder, fn, llArgs |> List.toArray, "")
 
     // Emit code for evaluating a Kernel Expression inside a function.
     member this.Eval(expr: Expr) : LLVMValueRef =
@@ -160,7 +165,7 @@ type Emitter(ctx: Context, module': LLVMModuleRef) =
         // then at this point we're sure that we've been passed a pointer
         // to an array as the first argument. Thus we can simply memcpy
         // the obtained value to the caller's stack.
-        | Arrow (_, Array (Const size, _)) ->
+        | Arrow (_, Array _) ->
             let localArray = this.Convert(value)
             let param = LLVM.GetParam(this.ValueOf(fn), 0u)
             let size = LLVM.BuildExtractValue(builder, param, 0u, "")
@@ -170,7 +175,12 @@ type Emitter(ctx: Context, module': LLVMModuleRef) =
             |> ignore
 
             LLVM.BuildRetVoid(builder)
-        | _ -> LLVM.BuildRet(builder, this.Convert(value))
+        | Arrow (_, Unit) ->
+            // It's important not to call Convert here: it will ICE!
+            LLVM.BuildRetVoid(builder)
+        | _ ->
+            // Convert the given value to LLVM and return it.
+            LLVM.BuildRet(builder, this.Convert(value))
 
     // Translate Kernel Term's into LLVM instructions inside a function.
     member this.Translate(fn: Symbol, term: Term) =
@@ -276,6 +286,10 @@ type Emitter(ctx: Context, module': LLVMModuleRef) =
 let execute (ctx, kir) =
     let module' = LLVM.ModuleCreateWithName("scratchpad.chi")
     let emitter = Emitter(ctx, module')
+
+    System.IO.File.WriteAllTextAsync("scratchpad.k", kir.ToString())
+    |> Async.AwaitTask
+    |> ignore
 
     for def in kir.defs do
         emitter.Emit(def)

@@ -132,6 +132,8 @@ let typename: Parser<Name> =
 let ann: Parser<Ann> =
     let ann, annRef = createParserForwardedToRef ()
 
+    let unitAnn = !@ "Unit" >>% Unit
+
     let wordAnn = !@ "Word" >>% Word
 
     let intAnn = !@ "Int" >>% Int
@@ -151,7 +153,8 @@ let ann: Parser<Ann> =
         |>> Array
 
     annRef.Value <-
-        choice [ wordAnn
+        choice [ unitAnn
+                 wordAnn
                  intAnn
                  boolAnn
                  charAnn
@@ -230,7 +233,7 @@ let expr: Parser<Expr> =
                  arrayExpr |>> List
                  stringExpr |>> List
                  becomeExpr |>> Call
-                 between (!@ "(") (!@^ ")") expr ]
+                 between (!@ "(") (!@^ ")") (expr <|>% Literal Empty) ]
 
     // Parser Combinators are bad with Left-Recursive Grammars.
     // This function represents the second part of a postfix expression,

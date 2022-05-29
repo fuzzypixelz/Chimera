@@ -8,6 +8,7 @@ open Chimera.Compiler.Kernel
 // The type of variable and function names.
 // Enumeration of Chimera's types.
 type Type =
+    | Unit
     | Int
     | Word
     | Bool
@@ -39,6 +40,7 @@ type Typer() =
         match value with
         | Literal literal ->
             match literal with
+            | Empty -> Unit
             | Integer _ -> Int
             | Boolean _ -> Bool
             | Character _ -> Char

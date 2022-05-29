@@ -164,3 +164,12 @@ let ArrayLen () =
         main(): Int = let array = [0] in add(len(array), 41)"
 
     Assert.AreEqual(42, run input)
+
+[<Test>]
+let UnitType () =
+    let input =
+        "nothing(): Unit = ()\n\
+        ![Entry]
+        main(): Int = let unit = nothing() in 42"
+
+    Assert.AreEqual(42, run input)

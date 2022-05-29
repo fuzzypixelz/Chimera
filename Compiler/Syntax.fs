@@ -11,6 +11,7 @@ type Const =
 
 // Enumeration of Chimera literals.
 type Literal =
+    | Empty
     | Integer of int64
     | Boolean of bool
     | Character of char
@@ -62,6 +63,7 @@ type Become = bool
 // Currently all function parameters need to be annotated, until we
 // achieve a full-fledged HM type system.
 type Ann =
+    | Unit
     | Int
     | Word
     | Bool
