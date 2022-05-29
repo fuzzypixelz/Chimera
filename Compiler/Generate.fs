@@ -6,6 +6,13 @@ open Chimera.Compiler.Syntax
 open Chimera.Compiler.Common
 open Chimera.Compiler.Kernel
 
+// Apparently LLVMSharp is missing some definitions.
+module LLVM' =
+    open System.Runtime.InteropServices
+
+    [<DllImport("libLLVM", CallingConvention = CallingConvention.Cdecl, EntryPoint = "LLVMBuildMemCpy")>]
+    extern LLVMValueRef BuildMemCpy(LLVMBuilderRef B, LLVMValueRef Dst, uint DstAlign, LLVMValueRef Src, uint SrcAlign, LLVMValueRef Size)
+
 let expect msg err = if err then failwith msg
 
 // Initialize the LLVM Native target.
@@ -21,14 +28,26 @@ let rec toLLType: Type -> LLVMTypeRef =
     | Char -> LLVM.Int8Type()
     | Bool -> LLVM.Int1Type()
     | Arrow (input, output) ->
-        let paramTypes = List.map toLLParamType input |> List.toArray
-        LLVM.FunctionType(toLLType output, paramTypes, false)
+        match output with
+        | Array _ ->
+            // When the return type is an array, we want to put it in the parameters
+            // as sret instead, and return void.
+            let paramTypes =
+                List.map toLLParamType (output :: input)
+                |> List.toArray
+
+            LLVM.FunctionType(LLVM.VoidType(), paramTypes, false)
+        | _ ->
+            let paramTypes = List.map toLLParamType input |> List.toArray
+            LLVM.FunctionType(toLLType output, paramTypes, false)
+
+    | Array (_, type') -> failwith "ICE: not supposed to call this right now." // toLLArray (type', uint32 (size))
 
 // Create the LLVM representation of a Chimera array.
-and toLLSlice (type': Type, len: uint32) =
+and toLLArray (type': Type) =
     LLVM.StructType(
         [| toLLType Word
-           LLVM.ArrayType(toLLType type', len) |],
+           LLVM.PointerType(toLLType type', 0u) |],
         false
     )
 
@@ -37,6 +56,7 @@ and toLLSlice (type': Type, len: uint32) =
 and toLLParamType: Type -> LLVMTypeRef =
     function
     | Arrow (_, _) as type' -> LLVM.PointerType(toLLType type', 0u)
+    | Array (_, type') -> toLLArray type'
     | other -> toLLType other
 
 // Create the LLVM representation of a Chimera literal.
@@ -74,33 +94,93 @@ type Emitter(ctx: Context, module': LLVMModuleRef) =
         | Literal literal -> toLLConst literal
         | Symbol symbol -> this.ValueOf(symbol)
 
+    // Emit code for evaluating a function call.
+    member this.EvalCall(fn: LLVMValueRef, callee: Symbol, args: list<Symbol>) : LLVMValueRef =
+        let name = ctx.GenerationName(callee)
+
+        let llArgs =
+            match ctx.Typer.TypeOf(callee) with
+            // If we're trying to call a function that's supposed to return an Array in Kernel,
+            // then we have to retrieve the return value through a stack allocation instead.
+            // FIXME: this is all very noisy and could be better optimized.
+            | Arrow (_, Array (Const size, type')) ->
+
+                let len = toLLConst (Integer(int64 size))
+                let ptr = LLVM.BuildArrayAlloca(builder, toLLType type', len, "")
+
+                let mutable array = LLVM.BuildAlloca(builder, toLLArray (type'), "")
+                array <- LLVM.BuildLoad(builder, array, "")
+                array <- LLVM.BuildInsertValue(builder, array, len, 0u, "")
+                array <- LLVM.BuildInsertValue(builder, array, ptr, 1u, "")
+
+                array :: List.map this.ValueOf args
+            | _ ->
+                // No need to do anything special with the return type.
+                List.map this.ValueOf args
+
+        LLVM.BuildCall(builder, fn, llArgs |> List.toArray, name)
+
     // Emit code for evaluating a Kernel Expression inside a function.
     member this.Eval(expr: Expr) : LLVMValueRef =
         match expr with
         | Value value -> this.Convert(value)
         | Add (lhs, rhs) -> LLVM.BuildAdd(builder, this.ValueOf(lhs), this.ValueOf(rhs), "")
         | Eq (lhs, rhs) -> LLVM.BuildICmp(builder, LLVMIntPredicate.LLVMIntEQ, this.ValueOf(lhs), this.ValueOf(rhs), "")
-        | Len slice -> LLVM.BuildExtractValue(builder, this.ValueOf(slice), 0u, "")
         | Call (tail, symbol, args) ->
-            let name = ctx.GenerationName(symbol)
             let fn = this.ValueOf(symbol)
-            let llArgs = List.map this.ValueOf args |> List.toArray
-            let call = LLVM.BuildCall(builder, fn, llArgs, name)
+            let call = this.EvalCall(fn, symbol, args)
             LLVM.SetTailCall(call, tail)
             call
-        | _ -> failwith "not yet implemented!"
+        | List symbols ->
+            let type' = ctx.Typer.TypeOf(symbols[0])
+            let size = Integer(List.length symbols) |> toLLConst
+            let ptr = LLVM.BuildArrayAlloca(builder, type' |> toLLType, size, "")
+
+            for (i, symbol) in List.indexed symbols do
+                let gep = LLVM.BuildGEP(builder, ptr, [| Integer(i) |> toLLConst |], "")
+
+                LLVM.BuildStore(builder, this.ValueOf(symbol), gep)
+                |> ignore
+
+            let mutable localArray = LLVM.BuildAlloca(builder, toLLArray type', "")
+            localArray <- LLVM.BuildLoad(builder, localArray, "")
+            localArray <- LLVM.BuildInsertValue(builder, localArray, size, 0u, "")
+            LLVM.BuildInsertValue(builder, localArray, ptr, 1u, "")
+        | Index (array, index) ->
+            let ptr = LLVM.BuildExtractValue(builder, this.ValueOf(array), 1u, "")
+            let gep = LLVM.BuildGEP(builder, ptr, [| this.ValueOf(index) |], "")
+            LLVM.BuildLoad(builder, gep, "")
+        | Len array -> LLVM.BuildExtractValue(builder, this.ValueOf(array), 0u, "")
+
+    // Translate a Kernel Return Term.
+    member this.TranslateReturn(fn: Symbol, value: Value) =
+
+        match ctx.Typer.TypeOf(fn) with
+        // If this function is supposed to return an Array in Kernel,
+        // then at this point we're sure that we've been passed a pointer
+        // to an array as the first argument. Thus we can simply memcpy
+        // the obtained value to the caller's stack.
+        | Arrow (_, Array (Const size, _)) ->
+            let localArray = this.Convert(value)
+            let param = LLVM.GetParam(this.ValueOf(fn), 0u)
+            let size = LLVM.BuildExtractValue(builder, param, 0u, "")
+            let array = LLVM.BuildExtractValue(builder, param, 1u, "")
+
+            LLVM'.BuildMemCpy(builder, localArray, 0u, array, 0u, size)
+            |> ignore
+
+            LLVM.BuildRetVoid(builder)
+        | _ -> LLVM.BuildRet(builder, this.Convert(value))
 
     // Translate Kernel Term's into LLVM instructions inside a function.
-    member this.Translate(fn: LLVMValueRef, term: Term) =
+    member this.Translate(fn: Symbol, term: Term) =
         match term with
-        | Return value ->
-            LLVM.BuildRet(builder, this.Convert(value))
-            |> ignore // I have no idea what these methods return at all!
+        | Return value -> this.TranslateReturn(fn, value) |> ignore
 
         | Cond (cond, then', else') ->
             // Initilize all basic blocks.
-            let thenBB = LLVM.AppendBasicBlock(fn, "then")
-            let elseBB = LLVM.AppendBasicBlock(fn, "else")
+            let thenBB = LLVM.AppendBasicBlock(this.ValueOf(fn), "then")
+            let elseBB = LLVM.AppendBasicBlock(this.ValueOf(fn), "else")
 
             // Generate code for the condition.
             let llCond = this.Eval(cond)
@@ -127,7 +207,25 @@ type Emitter(ctx: Context, module': LLVMModuleRef) =
 
         let aux i param =
             let llParam = LLVM.GetParam(fn, uint i)
-            this.SetValue(param, llParam)
+
+            let llValue =
+                match ctx.Typer.TypeOf(param) with
+                | Array (_, type') ->
+                    let size = LLVM.BuildExtractValue(builder, llParam, 0u, "")
+                    let ptr = LLVM.BuildExtractValue(builder, llParam, 1u, "")
+                    let localPtr = LLVM.BuildArrayAlloca(builder, toLLType type', size, "")
+
+                    LLVM'.BuildMemCpy(builder, localPtr, 0u, ptr, 0u, size)
+                    |> ignore
+
+                    let mutable localArray = LLVM.BuildAlloca(builder, toLLArray (type'), "")
+                    localArray <- LLVM.BuildLoad(builder, localArray, "")
+                    localArray <- LLVM.BuildInsertValue(builder, localArray, size, 0u, "")
+                    LLVM.BuildInsertValue(builder, localArray, ptr, 1u, "")
+
+                | _ -> llParam
+
+            this.SetValue(param, llValue)
 
         List.iteri aux params'
 
@@ -159,12 +257,13 @@ type Emitter(ctx: Context, module': LLVMModuleRef) =
             let fn = LLVM.AddFunction(module', name, type')
             this.SetValue(symbol, fn)
 
-            this.RegisterParams(symbol, params')
             this.AddInliningInfo(symbol)
 
             let entry = LLVM.AppendBasicBlock(fn, "entry")
             LLVM.PositionBuilderAtEnd(builder, entry)
-            this.Translate(fn, body)
+            this.RegisterParams(symbol, params')
+
+            this.Translate(symbol, body)
 
         | Signature symbol ->
             // FIXME: refactor this part.

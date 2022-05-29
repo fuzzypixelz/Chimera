@@ -13,6 +13,7 @@ type Type =
     | Bool
     | Char
     | Arrow of list<Type> * Type
+    | Array of Const * Type
 
 // The Typing Context.
 // This is seperated out into two parts since we choose to keep
@@ -21,10 +22,17 @@ type Typer() =
     let variables = Dictionary<Symbol, Type>(420)
 
     // Get the type of a variable.
-    member this.TypeOf(variable: Symbol) : Type = variables.GetValueOrDefault(variable)
+    member this.TypeOf(variable: Symbol) : Type =
+        if variables.ContainsKey(variable) then
+            variables[variable]
+        else
+            failwithf "ICE: the symbol `%A` has no type set." variable
 
-    // Set the type of a vatiable.
-    member this.SetType(variable: Symbol, type': Type) = variables.Add(variable, type')
+    // Set the type of a variable.
+    member this.SetType(variable: Symbol, type': Type) =
+        // NOTE: this may be a huge source of issues, but in general, setting
+        // a type twice happens in Kernel Branches and should be fine.
+        variables[variable] <- type'
 
     // Infer the type of a Value.
     member this.InferType(value: Value) : Type =
@@ -47,10 +55,11 @@ type Typer() =
             match this.TypeOf(symbol) with
             | Arrow (_, output) -> output
             | _ -> failwith "Error: attempt to call non-function value."
-        | Array (symbols, _) ->
+        | List symbols ->
             if List.isEmpty symbols then
                 failwith "Error: cannot infer type of empty slice."
             else
+                let len = List.length symbols
                 this.TypeOf(List.head symbols)
         | Index (symbol, _) -> this.TypeOf(symbol)
 
@@ -59,16 +68,24 @@ type Typer() =
         match term with
         | Return value -> this.InferType(value)
         | Bind (symbol, expr, term) ->
-            this.SetType(symbol, this.InferType(expr))
+            let type' = this.InferType(expr)
+            this.SetType(symbol, type')
             this.InferType(term)
-        | Cond (_, _, term) -> this.InferType(term)
+        | Cond (cond, thenTerm, elseTerm) ->
+            this.InferType(cond) |> ignore
+            this.InferType(thenTerm) |> ignore
+            this.InferType(elseTerm)
 
     member this.InferType(def: Def) : Type =
         match def with
         | Function (symbol, params', term) ->
-            let type' = Arrow(List.map this.TypeOf params', this.InferType(term))
-            this.SetType(symbol, type')
-            type'
+            // FIXME: something goes wrong when we try to infer the return type
+            // instead of setting it in Elaborate.
+            // let type' = Arrow(List.map this.TypeOf params', this.InferType(term))
+            // this.SetType(symbol, type')
+            // type'
+            this.InferType(term) |> ignore
+            this.TypeOf(symbol)
         // NOTE: function signatures' types are set during Elaboration,
         // this is because we don't want to propagate the annotation
         // all the way down here. The same goes for function parameters above.
@@ -249,7 +266,7 @@ type Marker() =
 type Context() =
 
     // The composing objects of Context.
-    member val OperatorParser = OperatorPrecedenceParser<Expr, unit, Context>()
+    member val OperatorParser = OperatorPrecedenceParser<Syntax.Expr, unit, Context>()
     member val Marker = Marker()
     // Generates unique symbols for variables.
     // Re-using the same structure and changing it place *should* lead

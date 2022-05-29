@@ -14,6 +14,8 @@ let rec toType: Ann -> Type =
     | Syntax.Bool -> Bool
     | Syntax.Char -> Char
     | Syntax.Arrow (input, output) -> Arrow(List.map toType input, toType output)
+    // The size of the array should be inferred upon construction.
+    | Syntax.Array (size, ann) -> Array(size, toType ann)
 
 type Translator(ctx: Context) =
 
@@ -31,11 +33,14 @@ type Translator(ctx: Context) =
 
         match expr with
         | Syntax.Literal literal -> Value(Literal literal) |> bind
+
         | Syntax.Name name -> Value(Symbol(ctx.Renamer.SymbolOf(name))) |> bind
+
         | Syntax.Bind (name, expr, body) ->
             let boundResult = ctx.Renamer.Bind(name)
             let bodyTerm = this.Flatten(body, result, cont)
             this.Flatten(expr, boundResult, bodyTerm)
+
         | Syntax.Call (become, fn, args) ->
             let results = [ for _ in args -> ctx.Renamer.Fresh() ]
             let aux state (expr, result) = this.Flatten(expr, result, state)
@@ -45,18 +50,20 @@ type Translator(ctx: Context) =
                 List.fold aux (bind (Call(become, fnResult, results))) (List.zip args results)
 
             this.Flatten(fn, fnResult, call)
+
         | Syntax.Cond (cond, then', else') ->
             let condResult = ctx.Renamer.Fresh()
             let thenTerm = this.Flatten(then', result, cont)
             let elseTerm = this.Flatten(else', result, cont)
             let nextTerm = Cond(Value(Symbol(condResult)), thenTerm, elseTerm)
             this.Flatten(cond, condResult, nextTerm)
-        | Syntax.Array body ->
+
+        | Syntax.List body ->
             // TODO: refactor this part.
             let results = [ for _ in body -> ctx.Renamer.Fresh() ]
-            let len = Integer(List.length results)
             let aux state (expr, result) = this.Flatten(expr, result, state)
-            List.fold aux (bind (Array(results, len))) (List.zip body results)
+            List.fold aux (bind (List results)) (List.zip body results)
+
         | Syntax.Index (array, index) ->
             let arrayResult = ctx.Renamer.Fresh()
             let indexResult = ctx.Renamer.Fresh()

@@ -5,6 +5,10 @@ type Name = string
 // All AST variables are renamed into numbers.
 type Symbol = int
 
+type Const =
+    | Unknown
+    | Const of uint64
+
 // Enumeration of Chimera literals.
 type Literal =
     | Integer of int64
@@ -63,6 +67,7 @@ type Ann =
     | Bool
     | Char
     | Arrow of list<Ann> * Ann
+    | Array of Const * Ann
 
 // Syntactic expression.
 type Expr =
@@ -72,7 +77,7 @@ type Expr =
     | Bind of Name * Expr * Expr
     | Cond of Expr * Expr * Expr
     | Call of Become * Expr * list<Expr>
-    | Array of list<Expr>
+    | List of list<Expr>
     | Index of Expr * Expr
 
 // Enumeration of Chimera Items.

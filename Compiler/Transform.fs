@@ -87,7 +87,7 @@ type Passes(ctx: Context) =
         kir
 
     // Sequence of Identity passes.
-    member this.All = this.InferTypes >> this.ExpandBuiltins
+    member this.All = this.ExpandBuiltins >> this.InferTypes
 
 // Run of the Identity passes.
 let passes (ctx, kir) = (ctx, Passes(ctx).All(kir))

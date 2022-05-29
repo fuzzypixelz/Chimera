@@ -142,12 +142,21 @@ let ann: Parser<Ann> =
 
     let arrowAnn = tupled ann .>> !@ "->" .>>. ann |>> Arrow
 
+    let constAnn = puint64 |>> Const <|>% Unknown
+
+    let arrayAnn =
+        tuple2
+        <| between (!@ "[") (!@ "]") constAnn
+        <| ann
+        |>> Array
+
     annRef.Value <-
         choice [ wordAnn
                  intAnn
                  boolAnn
                  charAnn
-                 arrowAnn ]
+                 arrowAnn
+                 arrayAnn ]
         |> hsc
 
     ann
@@ -218,8 +227,8 @@ let expr: Parser<Expr> =
                  literal |>> Literal
                  bindExpr |>> Bind
                  condExpr |>> Cond
-                 arrayExpr |>> Array
-                 stringExpr |>> Array
+                 arrayExpr |>> List
+                 stringExpr |>> List
                  becomeExpr |>> Call
                  between (!@ "(") (!@^ ")") expr ]
 

@@ -15,7 +15,7 @@ type Expr =
     | Len of Symbol
     | Call of Become * Symbol * list<Symbol>
     // FIXME: should the size really be called a "Literal"?
-    | Array of list<Symbol> * Literal
+    | List of list<Symbol>
     | Index of Symbol * Symbol
 
 // Third level of the ANF hiearchy; the highest recursive representation.

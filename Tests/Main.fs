@@ -157,7 +157,7 @@ let ArrayIndex () =
 let ArrayLen () =
     let input =
         "![Builtin Len]\n\
-        len: ([Int]) -> Int\n\
+        len: ([]Int) -> Int\n\
         ![Builtin Add]\n\
         add: (Int, Int) -> Int\n\
         ![Entry]\n\
