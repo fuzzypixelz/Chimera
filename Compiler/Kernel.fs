@@ -14,12 +14,13 @@ type Expr =
     | Eq of Symbol * Symbol
     | Len of Symbol
     | Call of Become * Symbol * list<Symbol>
-    // FIXME: should the size really be called a "Literal"?
     | List of list<Symbol>
     | Index of Symbol * Symbol
 
 // Third level of the ANF hiearchy; the highest recursive representation.
 type Term =
+    // No-op.
+    | Nothing
     | Return of Value
     | Bind of Symbol * Expr * Term
     | Cond of Expr * Term * Term
@@ -28,6 +29,7 @@ type Term =
 type Def =
     | Function of Symbol * list<Symbol> * Term
     | Signature of Symbol
+    | Variable of Symbol * Term
 
 // The Kernel IR.
 type IR =

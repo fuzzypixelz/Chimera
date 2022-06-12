@@ -76,16 +76,16 @@ type Expr =
     | Literal of Literal
     | Name of Name
     // FIXME: this should have a list<Item>
-    | Bind of Name * Expr * Expr
+    | Bind of list<Item> * Expr
     | Cond of Expr * Expr * Expr
     | Call of Become * Expr * list<Expr>
     | List of list<Expr>
     | Index of Expr * Expr
 
 // Enumeration of Chimera Items.
-type Item =
+and Item =
     | Function of Name * list<Name * Ann> * Ann * Expr
-    // | Variable of Name * Ann * Expr
+    | Variable of Name * Expr
     | Signature of Name * Ann
 
 // The Abstract Syntax Tree.

@@ -8,6 +8,7 @@ open Chimera.Compiler.Kernel
 // The type of variable and function names.
 // Enumeration of Chimera's types.
 type Type =
+    | Any
     | Unit
     | Int
     | Word
@@ -68,6 +69,7 @@ type Typer() =
     // Infer the type of a Term.
     member this.InferType(term: Term) : Type =
         match term with
+        | Nothing -> Any
         | Return value -> this.InferType(value)
         | Bind (symbol, expr, term) ->
             let type' = this.InferType(expr)
@@ -92,6 +94,14 @@ type Typer() =
         // this is because we don't want to propagate the annotation
         // all the way down here. The same goes for function parameters above.
         | Signature symbol -> this.TypeOf(symbol)
+        // FIXME: This relies on a stupid implicit invariant.
+        // Variables are elaborated into the form `%s = let %s = ... in Nothing`,
+        // So the type inference will run and have the side effect of setting the
+        // type of `%s`, but will return the Any type. So we need to query for `%s`'s type.
+        // The reason this is done is in order to Flatten the variable's expression early on.
+        | Variable (symbol, term) ->
+            this.InferType(term) |> ignore
+            this.TypeOf(symbol)
 
 // Small utility class for renaming variables inside functions.
 // This is a very thin wrapper around a Dictionnary and doesn't do much.
@@ -214,7 +224,7 @@ type Marker() =
         match attr with
         | Entry ->
             if not (this.FindAll(Entry) |> Seq.isEmpty) then
-                failwith "Error: can only apply the entry attribute once!"
+                failwith "Error: you can only apply the entry attribute once!"
             else
                 directory[ symbol ].Add(attr) |> ignore
         // TODO: checks.
@@ -294,11 +304,8 @@ type Context() =
                 | _ -> false
             )
 
-        let entryResult = this.Marker.Has (Entry) (symbol)
-
         match externResult with
         | Some (Extern (_, name)) -> name
-        | _ when entryResult -> "main"
         | _ -> this.Renamer.UniqueNameOf(symbol)
 
     // Maybe find the entry point of the program for code generation.

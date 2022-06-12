@@ -36,92 +36,92 @@ let run program =
 [<Test>]
 let FunctionCalls () =
     let input =
-        "fst(x: Int, y: Int): Int = x\n\
-        ![Entry]\n\
-        main(): Int = fst(42, 69)\n"
+        "fst(x: Int, y: Int): Int = x
+        ![Entry]
+        main(): Int = fst(42, 69)"
 
     Assert.AreEqual(42, run input)
 
 [<Test>]
 let NestedBindings () =
     let input =
-        "![Entry]\n\
-        main(): Int = let x = 13 in let y = 69 in let x = 42 in x\n"
+        "![Entry]
+        main(): Int = let x = 13 in let y = 69 in let x = 42 in x"
 
     Assert.AreEqual(42, run input)
 
 [<Test>]
 let NestedConditional () =
     let input =
-        "not(x: Bool): Bool = if x then false else true\n\
-        ![Entry]\n\
-        main(): Int = if not(false) then if not(true) then 13 else 42 else 69\n"
+        "not(x: Bool): Bool = if x then false else true
+        ![Entry]
+        main(): Int = if not(false) then if not(true) then 13 else 42 else 69"
 
     Assert.AreEqual(42, run input)
 
 [<Test>]
 let PassingFunctionToFunction () =
     let input =
-        "fortyTwo(): Int = 42\n\
-        zero(): Int = 0\n\
-        call(number: () -> Int): Int = number()\n\
-        ![Entry]\n\
-        main(): Int = if true then call(fortyTwo) else call(zero)\n"
+        "fortyTwo(): Int = 42
+        zero(): Int = 0
+        call(number: () -> Int): Int = number()
+        ![Entry]
+        main(): Int = if true then call(fortyTwo) else call(zero)"
 
     Assert.AreEqual(42, run input)
 
 [<Test>]
 let ShadowedDefinitionsWithAttrs () =
     let input =
-        "main(): Int = 13\n\
-        ![Entry]\n\
-        main(): Int = 42\n"
+        "main(): Int = 13
+        ![Entry]
+        main(): Int = 42"
 
     Assert.AreEqual(42, run input)
 
 [<Test>]
 let BuiltinAdd () =
     let input =
-        "![Builtin Add]\n\
-        add: (Int, Int) -> Int\n\
-        ![Entry]\n\
-        main(): Int = add(21, 21)\n"
+        "![Builtin Add]
+        add: (Int, Int) -> Int
+        ![Entry]
+        main(): Int = add(21, 21)"
 
     Assert.AreEqual(42, run input)
 
 [<Test>]
 let CallExternPutchar () =
     let input =
-        "![Extern Import \"putchar\"]\n\
-        putchar: (Int) -> Int\n\
-        ![Entry]\n\
-        main(): Int = putchar(42)\n"
+        "![Extern Import \"putchar\"]
+        putchar: (Int) -> Int
+        ![Entry]
+        main(): Int = putchar(42)"
 
     Assert.AreEqual(42, run input)
 
 [<Test>]
 let CallExternAbs () =
     let input =
-        "![Extern Import \"abs\"]\n\
-        abs: (Int) -> Int\n\
-        ![Entry]\n\
-        main(): Int = abs(-42)\n"
+        "![Extern Import \"abs\"]
+        abs: (Int) -> Int
+        ![Entry]
+        main(): Int = abs(-42)"
 
     Assert.AreEqual(42, run input)
 
 [<Test>]
 let TailCallEliminationMatters () =
     let input =
-        "![Builtin Eq]\n\
-        eq: (Int, Int) -> Bool\n\
-        ![Builtin Add]\n\
-        add: (Int, Int) -> Int\n\
-        count(start: Int, end: Int): Int =\n\
-            if eq(start, end)\n\
-            then 42\n\
-            else count(add(start, 1), end)\n\
-        ![Entry]\n\
-        main(): Int =\n\
+        "![Builtin Eq]
+        eq: (Int, Int) -> Bool
+        ![Builtin Add]
+        add: (Int, Int) -> Int
+        count(start: Int, end: Int): Int =
+            if eq(start, end)
+            then 42
+            else count(add(start, 1), end)
+        ![Entry]
+        main(): Int =
             count(0, 1000000000)"
 
     // 139 is the process signal for a SEGFAULT.
@@ -131,16 +131,16 @@ let TailCallEliminationMatters () =
 [<Test>]
 let TailCallElimination () =
     let input =
-        "![Builtin Eq]\n\
-        eq: (Int, Int) -> Bool\n\
-        ![Builtin Add]\n\
-        add: (Int, Int) -> Int\n\
-        count(start: Int, end: Int): Int =\n\
-            if eq(start, end)\n\
-            then 42\n\
-            else become count(add(start, 1), end)\n\
-        ![Entry]\n\
-        main(): Int =\n\
+        "![Builtin Eq]
+        eq: (Int, Int) -> Bool
+        ![Builtin Add]
+        add: (Int, Int) -> Int
+        count(start: Int, end: Int): Int =
+            if eq(start, end)
+            then 42
+            else become count(add(start, 1), end)
+        ![Entry]
+        main(): Int =
             count(0, 1000000000)"
 
     Assert.AreEqual(42, run input)
@@ -148,7 +148,7 @@ let TailCallElimination () =
 [<Test>]
 let ArrayIndex () =
     let input =
-        "![Entry]\n\
+        "![Entry]
         main(): Int = let array = [13, 42, 69] in array[1]"
 
     Assert.AreEqual(42, run input)
@@ -156,11 +156,11 @@ let ArrayIndex () =
 [<Test>]
 let ArrayLen () =
     let input =
-        "![Builtin Len]\n\
-        len: ([]Int) -> Int\n\
-        ![Builtin Add]\n\
-        add: (Int, Int) -> Int\n\
-        ![Entry]\n\
+        "![Builtin Len]
+        len: ([]Int) -> Int
+        ![Builtin Add]
+        add: (Int, Int) -> Int
+        ![Entry]
         main(): Int = let array = [0] in add(len(array), 41)"
 
     Assert.AreEqual(42, run input)
@@ -168,8 +168,41 @@ let ArrayLen () =
 [<Test>]
 let UnitType () =
     let input =
-        "nothing(): Unit = ()\n\
+        "nothing(): Unit = ()
         ![Entry]
         main(): Int = let unit = nothing() in 42"
+
+    Assert.AreEqual(42, run input)
+
+[<Test>]
+let LocalFunction () =
+    let input =
+        "![Entry]
+        main(): Int = let answer(): Int = 42 in answer()"
+
+    Assert.AreEqual(42, run input)
+
+[<Test>]
+let GlobalVariable () =
+    let input =
+        "answer = 42
+        ![Entry]
+        main(): Int = answer"
+
+    Assert.AreEqual(42, run input)
+
+[<Test>]
+let GlobalsAndLocals () =
+    let input =
+        "answer() : Int = 13
+        faux = false
+        number = answer()
+        ![Entry]
+        main() : Int = let 
+            leet = 1337
+            number = 42
+            zero() : Int = 0
+        in 
+            if faux then zero() else number"
 
     Assert.AreEqual(42, run input)

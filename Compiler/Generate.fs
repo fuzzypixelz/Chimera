@@ -23,6 +23,7 @@ let expect msg err = if err then failwith msg
 // Translate a Kernel type into an LLVM type.
 let rec toLLType: Type -> LLVMTypeRef =
     function
+    | Any -> failwith "ICE: unresolved `Any` type."
     | Unit -> LLVM.VoidType()
     | Int
     | Word -> LLVM.Int64Type()
@@ -42,7 +43,7 @@ let rec toLLType: Type -> LLVMTypeRef =
             let paramTypes = List.map toLLParamType input |> List.toArray
             LLVM.FunctionType(toLLType output, paramTypes, false)
 
-    | Array (_, type') -> failwith "ICE: not supposed to call this right now." // toLLArray (type', uint32 (size))
+    | Array (_, _) -> failwith "ICE: not supposed to call this right now." // toLLArray (type', uint32 (size))
 
 // Create the LLVM representation of a Chimera array.
 and toLLArray (type': Type) =
@@ -77,21 +78,39 @@ let toLLConst: Literal -> LLVMValueRef =
 
 type Emitter(ctx: Context, module': LLVMModuleRef) =
     // Keep track of the LLVM values corresponding to a given symbol.
-    let llValues = Dictionary<Symbol, LLVMValueRef>(42)
+    let locals = Dictionary<Symbol, LLVMValueRef>(42)
+    let globals = Dictionary<Symbol, LLVMValueRef>(42)
     let builder = LLVM.CreateBuilder()
+
+    member val Main =
+        let type' = Arrow([], Int) |> toLLType
+        let fn = LLVM.AddFunction(module', "main", type')
+        let symbol = ctx.Renamer.Fresh()
+        locals.Add(symbol, fn)
+        LLVM.AppendBasicBlock(fn, "entry") |> ignore
+        symbol
 
     // What is the LLVM value for this symbol?
     member this.ValueOf(symbol: Symbol) : LLVMValueRef =
-        if not (llValues.ContainsKey(symbol)) then
-            failwithf "ICE: rogue symbol `%i`" symbol
+        if locals.ContainsKey(symbol) then
+            locals.GetValueOrDefault(symbol)
+        else if globals.ContainsKey(symbol) then
+            let value = globals.GetValueOrDefault(symbol)
+            LLVM.BuildLoad(builder, value, "")
         else
-            llValues.GetValueOrDefault(symbol)
+            failwithf "ICE: the symbol `%i` has no LLVM value set." symbol
 
-    // Map a symbol to an LLVM value.
+    // Map a local symbol to an LLVM value.
     member this.SetValue(symbol: Symbol, value: LLVMValueRef) =
         // if not (llValues.TryAdd(symbol, value)) then
         //     failwithf "ICE: re-mapping of symbol %i while generating LLVM" symbol
-        llValues[symbol] <- value
+        locals[symbol] <- value
+
+    // Map a global symbol to an LLVM value.
+    member this.SetGlobalValue(symbol: Symbol, value: LLVMValueRef) =
+        // if not (llValues.TryAdd(symbol, value)) then
+        //     failwithf "ICE: re-mapping of symbol %i while generating LLVM" symbol
+        globals[symbol] <- value
 
     // Convert a Kernel value into an LLVM value.
     member this.Convert(value: Value) : LLVMValueRef =
@@ -185,6 +204,8 @@ type Emitter(ctx: Context, module': LLVMModuleRef) =
     // Translate Kernel Term's into LLVM instructions inside a function.
     member this.Translate(fn: Symbol, term: Term) =
         match term with
+        | Nothing -> ()
+
         | Return value -> this.TranslateReturn(fn, value) |> ignore
 
         | Cond (cond, then', else') ->
@@ -243,6 +264,7 @@ type Emitter(ctx: Context, module': LLVMModuleRef) =
         let fn = this.ValueOf(symbol)
         let lcx = LLVM.GetModuleContext(module')
 
+        // TODO: refactor this.
         let aux name =
             let kind = LLVM.GetEnumAttributeKindForName(name, String.length name)
             // FIXME: I'm not sure what the last parameter does.
@@ -283,6 +305,32 @@ type Emitter(ctx: Context, module': LLVMModuleRef) =
             LLVM.SetLinkage(fn, LLVMLinkage.LLVMExternalLinkage)
             this.SetValue(symbol, fn)
 
+        | Variable (symbol, body) ->
+            let type' = ctx.Typer.TypeOf(symbol) |> toLLType
+            let global' = LLVM.AddGlobal(module', type', "")
+            LLVM.SetInitializer(global', LLVM.GetUndef(type'))
+            let block = LLVM.GetLastBasicBlock(this.ValueOf(this.Main))
+            LLVM.PositionBuilderAtEnd(builder, block)
+            this.Translate(this.Main, body)
+
+            LLVM.BuildStore(builder, this.ValueOf(symbol), global')
+            |> ignore
+
+            // FIXME: Move the symbol from being a local to a global. Which is dumb.
+            locals.Remove(symbol) |> ignore
+            this.SetGlobalValue(symbol, global')
+
+    // Call the entry point (if it exists) and end `main`.
+    // This should be called at the end of code generation.
+    member this.Done() =
+        ctx.Marker.FindLastOne(Entry)
+        |> Option.map (fun symbol ->
+            let block = LLVM.GetLastBasicBlock(this.ValueOf(this.Main))
+            LLVM.PositionBuilderAtEnd(builder, block)
+            let result = LLVM.BuildCall(builder, this.ValueOf(symbol), [||], "")
+            LLVM.BuildRet(builder, result))
+        |> ignore
+
 let execute (ctx, kir) =
     let module' = LLVM.ModuleCreateWithName("scratchpad.chi")
     let emitter = Emitter(ctx, module')
@@ -294,12 +342,14 @@ let execute (ctx, kir) =
     for def in kir.defs do
         emitter.Emit(def)
 
+    emitter.Done()
+
     let mutable error = null
 
-    !> LLVM.VerifyModule(module', LLVMVerifierFailureAction.LLVMAbortProcessAction, &error)
+    !> LLVM.PrintModuleToFile(module', "scratchpad.ll", &error)
     |> expect error
 
-    !> LLVM.PrintModuleToFile(module', "scratchpad.ll", &error)
+    !> LLVM.VerifyModule(module', LLVMVerifierFailureAction.LLVMAbortProcessAction, &error)
     |> expect error
 
     async {

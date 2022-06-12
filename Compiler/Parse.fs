@@ -29,7 +29,7 @@ type Parser<'a> = Parser<'a, Context>
 
 // Line seperator; used to distinguish Items in a sequence.
 let endline =
-    choice [ skipMany newline
+    choice [ skipMany1 newline
              skipChar ';'
              eof ]
 
@@ -132,15 +132,15 @@ let typename: Parser<Name> =
 let ann: Parser<Ann> =
     let ann, annRef = createParserForwardedToRef ()
 
-    let unitAnn = !@ "Unit" >>% Unit
+    let unitAnn = !@^ "Unit" >>% Unit
 
-    let wordAnn = !@ "Word" >>% Word
+    let wordAnn = !@^ "Word" >>% Word
 
-    let intAnn = !@ "Int" >>% Int
+    let intAnn = !@^ "Int" >>% Int
 
-    let boolAnn = !@ "Bool" >>% Bool
+    let boolAnn = !@^ "Bool" >>% Bool
 
-    let charAnn = !@ "Char" >>% Char
+    let charAnn = !@^ "Char" >>% Char
 
     let arrowAnn = tupled ann .>> !@ "->" .>>. ann |>> Arrow
 
@@ -167,8 +167,8 @@ let ann: Parser<Ann> =
 // Parse Chimera literals.
 let literal: Parser<Literal> =
     let boolLiteral =
-        choice [ !@ "true" >>% Boolean true
-                 !@ "false" >>% Boolean false ]
+        choice [ !@^ "true" >>% Boolean true
+                 !@^ "false" >>% Boolean false ]
 
     let intLiteral = pint64 |>> Integer
 
@@ -180,10 +180,94 @@ let literal: Parser<Literal> =
              intLiteral
              charLiteral ]
 
-// Parse a Chimera expression, a rule to keep in mind is to never consume newlines here.
-let expr: Parser<Expr> =
-    let expr, exprRef = createParserForwardedToRef ()
+// Parse a Chimera attribute, this is usually added on top of functions and types.
+let attr: Parser<Attr> =
+    let inlineAttr =
+        choice [ !@ "Always" >>% Always
+                 !@ "Never" >>% Never
+                 !@ "Hint" >>% Hint ]
+        |> opt
+        // Is this a sane default?
+        |>> Option.defaultValue Hint
+        |>> Inline
 
+    let builtinAttr =
+        choice [ !@ "Add" >>% Add
+                 !@ "Eq" >>% Eq
+                 !@ "Len" >>% Len ]
+        |>> Builtin
+
+    let externAttr =
+        tuple2
+            (choice [ !@ "Import" >>% Import
+                      !@ "Export" >>% Export ])
+            (!@ "\"" >>. charsTillString "\"" true 1337)
+        |>> Extern
+
+    let inner =
+        choice [ !@ "Whatever" >>% Whatever
+                 !@ "Entry" >>% Entry
+                 !@ "Inline" >>. inlineAttr
+                 !@ "Builtin" >>. builtinAttr
+                 !@ "Extern" >>. externAttr ]
+
+    between (!@ "![") (!@ "]") inner
+
+// NOTE: we have to do this terribleness because F# doesn't have a notion
+// of forward declaration. The important consequence is that expr is define
+// in the line that asigns to `expr.Value`.
+let expr, exprRef = createParserForwardedToRef ()
+
+// Parse a Chimera Item, without consuming an endline at the end.
+let hitem: Parser<Item> =
+    // Parse an attribute followed by a name.
+    // The attribute doesn't appear in the Syntax Tree but is rather saved in Context.
+    // This is done to make Symbol -> Attr lookups easier later on.
+    // It's also necessary to support ![Infix ..]-style attributes.
+    let attrAndName: Parser<Name> =
+
+        let aux (ctx: Context, attr: option<Attr>, name: Name) =
+            let symbol = ctx.Renamer.ForwardBind(name)
+
+            Option.map (fun attr -> ctx.Marker.Mark(symbol, attr)) attr
+            |> ignore
+
+            preturn name
+
+        tuple3 getUserState (opt attr) (attempt name)
+        >>= aux
+
+    // Parse a function parameter.
+    let param: Parser<Name * Ann> = tuple2 (name .>> !@ ":") ann
+
+    let items name =
+        let functionItem =
+            tuple4
+            <| preturn name
+            <| tupled param
+            <| (!@ ":" >>. ann)
+            <| (!@ "=" >>. expr)
+            |>> Function
+
+        let variableItem =
+            tuple2 (preturn name) (!@ "=" >>. expr)
+            |>> Variable
+
+        let signatureItem =
+            tuple2 (preturn name) (!@ ":" >>. ann)
+            |>> Signature
+
+        choice [ functionItem
+                 variableItem
+                 signatureItem ]
+
+    attrAndName >>= items |> hsc
+
+// Parse a Chimera Item.
+let item: Parser<Item> = hitem .>> endline |> sc
+
+// Parse a Chimera expression, a rule to keep in mind is to never consume newlines here.
+exprRef.Value <-
     // NOTE: newlines and expressions have a weird interaction.
     // Because we want to be able to write `{ expr1\n expr2 }` we
     // need to treat newlines after expressions in a special way.
@@ -217,12 +301,23 @@ let expr: Parser<Expr> =
             | Call (false, callee, args) -> preturn (true, callee, args)
             | _ -> failFatally "Error: `become` can only be applied to function calls."
 
-    let bindExpr = tuple3 (!@ "let" >>. name) (!@ "=" >>. sc expr) (!@ "in" >>. expr)
+    let bindExpr =
+        let locals =
+            attempt (many1 item)
+            <|> (hitem |>> List.singleton)
+
+        tuple2 (!@ "let" >>. locals) (!@ "in" >>. expr)
 
     let condExpr =
         tuple3 (!@ "if" >>. sc expr) (!@ "then" >>. sc expr) (!@ "else" >>. expr)
 
     let arrayExpr = between (!@ "[") (!@^ "]") (sepBy expr (!@ ","))
+
+    // Parse an infix, prefex or postfix expression.
+    let operatorExpr =
+        getUserState
+        >>= fun ctx -> ctx.OperatorParser.ExpressionParser: Parser<Expr>
+
 
     // These are considered primary because they can be identified by the first token.
     let primaryExpr =
@@ -261,91 +356,10 @@ let expr: Parser<Expr> =
     // where the parser keeps applying itself to the leftmost sequence.
     let postfixExpr = primaryExpr >>= postfixExprEnd
 
-    exprRef.Value <- postfixExpr |> hsc
-
-    expr
-
-// Parse an infix, prefex or postfix expression.
-let operator: Parser<Expr> =
-    getUserState
-    >>= fun ctx -> ctx.OperatorParser.ExpressionParser
-
-// Parse a function parameter.
-let param: Parser<Name * Ann> = tuple2 (name .>> !@ ":") ann
-
-// Parse a function item.
-let item: Parser<Item> =
-    let functionItem =
-        tuple4
-        <| name
-        <| tupled param
-        <| (!@ ":" >>. ann)
-        <| (!@ "=" >>. expr .>> endline)
-        |>> Function
-
-    let signatureItem = tuple2 name (!@ ":" >>. ann) |>> Signature
-
-    choice [ attempt functionItem
-             signatureItem ]
-    |> sc
-
-// Parse a Chimera attribute, this is usually added on top of functions and types.
-let attr: Parser<Attr> =
-    let inlineAttr =
-        choice [ !@ "Always" >>% Always
-                 !@ "Never" >>% Never
-                 !@ "Hint" >>% Hint ]
-        |> opt
-        // Is this a sane default?
-        |>> Option.defaultValue Hint
-        |>> Inline
-
-    let builtinAttr =
-        choice [ !@ "Add" >>% Add
-                 !@ "Eq" >>% Eq
-                 !@ "Len" >>% Len ]
-        |>> Builtin
-
-    let externAttr =
-        tuple2
-            (choice [ !@ "Import" >>% Import
-                      !@ "Export" >>% Export ])
-            (!@ "\"" >>. charsTillString "\"" true 1337)
-        |>> Extern
-
-    let inner =
-        choice [ !@ "Whatever" >>% Whatever
-                 !@ "Entry" >>% Entry
-                 !@ "Inline" >>. inlineAttr
-                 !@ "Builtin" >>. builtinAttr
-                 !@ "Extern" >>. externAttr ]
-
-    between (!@ "![") (!@ "]") inner
-
-// Ask the Compiler Context to mark this item with its attribute.
-// This is done right after parsing the item itself.
-// FIXME: this doesn't work with recursive operators.
-let registerAttr (attr: option<Attr>, item: Item) : Parser<Item> =
-    let aux (name: Name) (ctx: Context) =
-        let symbol = ctx.Renamer.ForwardBind(name)
-
-        Option.map (fun attr -> ctx.Marker.Mark(symbol, attr)) attr
-        |> ignore
-
-        preturn item
-
-    getUserState
-    >>= aux (
-        match item with
-        | Function (name, _, _, _) -> name
-        | Signature (name, _) -> name
-    )
-
-// Transform an itemKind parser into one that supports optional attributes.
-let attrThenItem: Parser<Item> = tuple2 (opt attr) item >>= registerAttr
+    postfixExpr |> hsc
 
 // Parse the full syntax tree.
-let ast: Parser<IR> = many attrThenItem .>> eof |>> IR.make
+let ast: Parser<IR> = many item .>> eof |>> IR.make
 
 // Helper function for running the parser
 // Weirdly enough, this is where the Compiler context is created.
