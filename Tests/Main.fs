@@ -206,3 +206,15 @@ let GlobalsAndLocals () =
             if faux then zero() else number"
 
     Assert.AreEqual(42, run input)
+
+[<Test>]
+let Comments () =
+    let input =
+        "{--}
+        answer = 42
+        --}
+        ![Entry]
+        -- Toggled comments!
+        main () : Int = answer"
+
+    Assert.AreEqual(42, run input)

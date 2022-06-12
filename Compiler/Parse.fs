@@ -359,7 +359,9 @@ exprRef.Value <-
     postfixExpr |> hsc
 
 // Parse the full syntax tree.
-let ast: Parser<IR> = many item .>> eof |>> IR.make
+let ast: Parser<IR> =
+    (preturn () |> sc) >>. many item .>> eof
+    |>> IR.make
 
 // Helper function for running the parser
 // Weirdly enough, this is where the Compiler context is created.
