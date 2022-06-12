@@ -1,12 +1,12 @@
 ![Extern Import "putchar"]
-putchar: (Char) -> Char
+putchar : (Char) -> Char
 
 ![Builtin Add]
 -- TODO: implement infix operators through attributes.
-add: (Int, Int) -> Int
+add : (Int, Int) -> Int
 
 ![Builtin Eq]
-eq: (Int, Int) -> Bool
+eq : (Int, Int) -> Bool
 
 ![Builtin Len]
 -- TODO: handle left-recursion in annotations; 
@@ -15,16 +15,18 @@ eq: (Int, Int) -> Bool
 -- currently you have to define `len` for each array type.
 len: ([]Char) -> Int
 
-print(str: []Char, step: Int): Int =
--- TODO: allow for local functions using lambda-lifting.
--- this will be done through allowing items to be non-function
--- values and then upgrading let-syntax to let [item] in expr.
-    if eq(step, len(str))
-    then 0 
-    else 
-        let tmp = putchar(str[step]) in 
-        become print(str, add(step, 1))
+print (s : []Char) : Unit = let
+    -- FIXME: function parameters are not properly shadowed.
+    -- So we cannot replace `s` with `str`. This is a bug.
+    loop(str : []Char, step : Int) : Unit =
+        if eq(step, len(str))
+        then ()
+        else let 
+            tmp = putchar(str[step]) 
+        in 
+            become loop(str, add(step, 1))
+in
+    loop(s, 0)
 
 ![Entry]
-main(): Int =
-    print("Hello, Chimera!", 0)
+main () : Int = let tmp = print("Chi!\n") in 0
